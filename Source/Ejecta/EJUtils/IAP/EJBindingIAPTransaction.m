@@ -1,5 +1,4 @@
 #import "EJBindingIAPTransaction.h"
-#import "NSData+SRB64Additions.h" // Use SocketRocket's Base64 encoder
 
 @implementation EJBindingIAPTransaction
 
@@ -35,7 +34,11 @@ EJ_BIND_GET(productId, ctx) {
 }
 
 EJ_BIND_GET(receipt, ctx) {
-	return NSStringToJSValue(ctx, [[transaction transactionReceipt] SR_stringByBase64Encoding]);
+	NSData *receipt = [NSData dataWithContentsOfURL:NSBundle.mainBundle.appStoreReceiptURL];
+	if( !receipt ) {
+		return NULL;
+	}
+	return NSStringToJSValue(ctx, [receipt base64EncodedStringWithOptions:0]);
 }
 
 @end

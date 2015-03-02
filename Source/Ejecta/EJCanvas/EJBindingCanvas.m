@@ -4,7 +4,8 @@
 #import "EJCanvasContext2DTexture.h"
 #import "EJBindingCanvasContext2D.h"
 
-#import "EJCanvasContextWebGL.h"
+#import "EJCanvasContextWebGLScreen.h"
+#import "EJCanvasContextWebGLTexture.h"
 #import "EJBindingCanvasContextWebGL.h"
 
 #import "EJJavaScriptView.h"
@@ -53,16 +54,17 @@
 }
 
 - (EJTexture *)texture {
-	if( [renderingContext isKindOfClass:[EJCanvasContext2DTexture class]] ) {
-		return ((EJCanvasContext2DTexture *)renderingContext).texture;
+	if( [renderingContext respondsToSelector:@selector(texture)] ) {
+		return [(id)renderingContext texture];
 	}
 	else {
 		return nil;
 	}
 }
 
-#define EJ_SET_STYLE(NAME, TARGET) \
-	- (void)NAME:(float)value { \
+#define EJ_GET_SET_STYLE(GETTER, SETTER, TARGET) \
+	- (float)GETTER { return TARGET; } \
+	- (void)SETTER:(float)value { \
 		TARGET = value; \
 		if( renderingContext && [renderingContext conformsToProtocol:@protocol(EJPresentable)] ) { \
 			scriptView.currentRenderingContext = renderingContext; \
@@ -70,12 +72,12 @@
 		} \
 	} \
 	
-	EJ_SET_STYLE(setStyleWidth, style.size.width);
-	EJ_SET_STYLE(setStyleHeight, style.size.height);
-	EJ_SET_STYLE(setStyleLeft, style.origin.x);
-	EJ_SET_STYLE(setStyleTop, style.origin.y);
+	EJ_GET_SET_STYLE(styleWidth, setStyleWidth, style.size.width);
+	EJ_GET_SET_STYLE(styleHeight, setStyleHeight, style.size.height);
+	EJ_GET_SET_STYLE(styleLeft, setStyleLeft, style.origin.x);
+	EJ_GET_SET_STYLE(styleTop, setStyleTop, style.origin.y);
 
-#undef EJ_SET_STYLE
+#undef EJ_GET_SET_STYLE
 
 
 EJ_BIND_GET(width, ctx) {
@@ -163,17 +165,29 @@ EJ_BIND_FUNCTION(getContext, ctx, argc, argv) {
 	
 	NSString *type = JSValueToNSString(ctx, argv[0]);
 	EJCanvasContextMode newContextMode = kEJCanvasContextModeInvalid;
+	id contextClass, bindingClass;
 	
 	if( [type isEqualToString:@"2d"] ) {
 		newContextMode = kEJCanvasContextMode2D;
+		bindingClass = EJBindingCanvasContext2D.class;
+		contextClass = isScreenCanvas
+			? EJCanvasContext2DScreen.class
+			: EJCanvasContext2DTexture.class;
 	}
 	else if( [type rangeOfString:@"webgl"].location != NSNotFound ) {
 		newContextMode = kEJCanvasContextModeWebGL;
+		bindingClass = EJBindingCanvasContextWebGL.class;
+		contextClass = isScreenCanvas
+			? EJCanvasContextWebGLScreen.class
+			: EJCanvasContextWebGLTexture.class;
+	}
+	else {
+		NSLog(@"Warning: Invalid argument %@ for getContext()", type);
+		return NULL;
 	}
 	
 	
 	if( contextMode != kEJCanvasContextModeInvalid ) {
-	
 		// Nothing changed? - just return the already created context
 		if( contextMode == newContextMode ) {
 			return jsCanvasContext;
@@ -186,64 +200,86 @@ EJ_BIND_FUNCTION(getContext, ctx, argc, argv) {
 		}
 	}
 	
-	
-	
-	// Create the requested CanvasContext
+	contextMode = newContextMode;
 	scriptView.currentRenderingContext = nil;
 	
-	if( newContextMode == kEJCanvasContextMode2D ) {
-		if( isScreenCanvas ) {
-			EJCanvasContext2DScreen *sc = [[EJCanvasContext2DScreen alloc]
-				initWithScriptView:scriptView width:width height:height style:style];
-			sc.useRetinaResolution = useRetinaResolution;
-			
-			scriptView.screenRenderingContext = sc;
-			renderingContext = sc;
-		}
-		else {
-			EJCanvasContext2DTexture *tc = [[EJCanvasContext2DTexture alloc]
-				initWithScriptView:scriptView width:width height:height];
-			tc.useRetinaResolution = useRetinaResolution;
-			
-			renderingContext = tc;
-		}
-		
-		// Create the JS object
-		EJBindingCanvasContext2D *binding = [[EJBindingCanvasContext2D alloc]
-			initWithCanvas:jsObject renderingContext:(EJCanvasContext2D *)renderingContext];
-		jsCanvasContext = [EJBindingCanvasContext2D createJSObjectWithContext:ctx scriptView:scriptView instance:binding];
-		[binding release];
-		JSValueProtect(ctx, jsCanvasContext);
-	}
-	
-	else if( newContextMode == kEJCanvasContextModeWebGL ) {
-		EJCanvasContextWebGL *sc = [[EJCanvasContextWebGL alloc]
-			initWithScriptView:scriptView width:width height:height style:style];
-		sc.useRetinaResolution = useRetinaResolution;
-		
-		scriptView.screenRenderingContext = sc;
-		renderingContext = sc;
-		
-		// Create the JS object
-		EJBindingCanvasContextWebGL *binding = [[EJBindingCanvasContextWebGL alloc]
-			initWithCanvas:jsObject renderingContext:(EJCanvasContextWebGL *)renderingContext];
-		jsCanvasContext = [EJBindingCanvasContextWebGL createJSObjectWithContext:ctx scriptView:scriptView instance:binding];
-		[binding release];
-		JSValueProtect(ctx, jsCanvasContext);
-	}
-	
-	
-	contextMode = newContextMode;
-	
+	// Configure and create the Canvas Context
+	renderingContext = [[contextClass alloc] initWithScriptView:scriptView width:width height:height];
+	renderingContext.useRetinaResolution = useRetinaResolution;
 	renderingContext.msaaEnabled = msaaEnabled;
 	renderingContext.msaaSamples = msaaSamples;
+	
+	if( isScreenCanvas ) {
+		scriptView.screenRenderingContext = (EJCanvasContext<EJPresentable> *)renderingContext;
+		scriptView.screenRenderingContext.style = style;
+	}
 	
 	[EAGLContext setCurrentContext:renderingContext.glContext];
 	[renderingContext create];
 	scriptView.currentRenderingContext = renderingContext;
 	
 	
+	// Create the JS object
+	EJBindingBase *binding = [[bindingClass alloc] initWithCanvas:jsObject renderingContext:(id)renderingContext];
+	jsCanvasContext = [bindingClass createJSObjectWithContext:ctx scriptView:scriptView instance:binding];
+	[binding release];
+	JSValueProtect(ctx, jsCanvasContext);
+	
 	return jsCanvasContext;
 }
+
+- (JSValueRef)toDataURLWithCtx:(JSContextRef)ctx argc:(size_t)argc argv:(const JSValueRef [])argv hd:(BOOL)hd {
+	if( contextMode != kEJCanvasContextMode2D ) {
+		NSLog(@"Error: toDataURL() not supported for this context");
+		return NSStringToJSValue(ctx, @"data:,");
+	}
+	
+	
+	EJCanvasContext2D *context = (EJCanvasContext2D *)renderingContext;
+	
+	// Get the ImageData from the Canvas
+	float scale = hd ? context.backingStoreRatio : 1;
+	float w = context.width * context.backingStoreRatio;
+	float h = context.height * context.backingStoreRatio;
+	
+	EJImageData *imageData = (scale != 1)
+		? [context getImageDataHDSx:0 sy:0 sw:w sh:h]
+		: [context getImageDataSx:0 sy:0 sw:w sh:h];
+			
+	
+	// Generate the UIImage
+	UIImage *image = [EJTexture imageWithPixels:imageData.pixels width:imageData.width height:imageData.height scale:scale];
+	
+	NSString *prefix;
+	NSData *raw;
+	
+	// JPEG?
+	if( argc > 0 && [JSValueToNSString(ctx, argv[0]) isEqualToString:@"image/jpeg"] ) {
+		float quality = (argc > 1)
+			? JSValueToNumberFast(ctx, argv[1])
+			: EJ_CANVAS_DEFAULT_JPEG_QUALITY;
+		
+		prefix = EJ_CANVAS_DATA_URL_PREFIX_JPEG;
+		raw = UIImageJPEGRepresentation(image, quality);
+	}
+	// Default to PNG
+	else {
+		prefix = EJ_CANVAS_DATA_URL_PREFIX_PNG;
+		raw = UIImagePNGRepresentation(image);
+	}
+	
+	NSString *encoded = [prefix stringByAppendingString:[raw base64EncodedStringWithOptions:0]];
+	return NSStringToJSValue(ctx, encoded);
+}
+
+EJ_BIND_FUNCTION(toDataURL, ctx, argc, argv) {
+	return [self toDataURLWithCtx:ctx argc:argc argv:argv hd:NO];
+}
+
+EJ_BIND_FUNCTION(toDataURLHD, ctx, argc, argv) {
+	return [self toDataURLWithCtx:ctx argc:argc argv:argv hd:YES];
+}
+
+EJ_BIND_CONST(nodeName, "CANVAS");
 
 @end

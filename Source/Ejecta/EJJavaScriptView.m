@@ -5,6 +5,21 @@
 #import <objc/runtime.h>
 
 
+// Block function callbacks
+JSValueRef EJBlockFunctionCallAsFunction(
+	JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject, size_t argc, const JSValueRef argv[], JSValueRef* exception
+) {
+	JSValueRef (^block)(JSContextRef ctx, size_t argc, const JSValueRef argv[]) = JSObjectGetPrivate(function);
+	JSValueRef ret = block(ctx, argc, argv);
+	return ret ? ret : JSValueMakeUndefined(ctx);
+}
+
+void EJBlockFunctionFinalize(JSObjectRef object) {
+	JSValueRef (^block)(JSContextRef ctx, size_t argc, const JSValueRef argv[]) = JSObjectGetPrivate(object);
+	[block release];
+}
+
+
 #pragma mark -
 #pragma mark Ejecta view Implementation
 
@@ -20,12 +35,13 @@
 @synthesize currentRenderingContext;
 @synthesize openGLContext;
 
-@synthesize lifecycleDelegate;
+@synthesize windowEventsDelegate;
 @synthesize touchDelegate;
 @synthesize deviceMotionDelegate;
 @synthesize screenRenderingContext;
 
 @synthesize backgroundQueue;
+@synthesize classLoader;
 
 - (id)initWithFrame:(CGRect)frame {
 	return [self initWithFrame:frame appFolder:EJECTA_DEFAULT_APP_FOLDER];
@@ -33,6 +49,7 @@
 
 - (id)initWithFrame:(CGRect)frame appFolder:(NSString *)folder {
 	if( self = [super initWithFrame:frame] ) {
+		oldSize = frame.size;
 		appFolder = [folder retain];
 		
 		isPaused = false;
@@ -108,18 +125,22 @@
 	[openALManager release];
 	[classLoader release];
 	
+	if( jsBlockFunctionClass ) {
+		JSClassRelease(jsBlockFunctionClass);
+	}
 	[screenRenderingContext finish];
 	[screenRenderingContext release];
 	[currentRenderingContext release];
 	
 	[touchDelegate release];
-	[lifecycleDelegate release];
+	[windowEventsDelegate release];
 	[deviceMotionDelegate release];
 	
 	[timers release];
 	
 	[openGLContext release];
 	[appFolder release];
+	[proxy release];
 	[super dealloc];
 }
 
@@ -159,6 +180,17 @@
 	}
 }
 
+- (void)layoutSubviews {
+	[super layoutSubviews];
+	
+	// Check if we did resize
+	CGSize newSize = self.bounds.size;
+	if( newSize.width != oldSize.width || newSize.height != oldSize.height ) {
+		[windowEventsDelegate resize];
+		oldSize = newSize;
+	}
+}
+
 
 #pragma mark -
 #pragma mark Script loading and execution
@@ -171,13 +203,20 @@
 	NSString *script = [NSString stringWithContentsOfFile:[self pathForResource:path]
 		encoding:NSUTF8StringEncoding error:NULL];
 	
-	[self loadScript:script sourceURL:path];
+	[self evaluateScript:script sourceURL:path];
 }
 
-- (void)loadScript:(NSString *)script sourceURL:(NSString *)sourceURL {
+- (JSValueRef)evaluateScript:(NSString *)script {
+	return [self evaluateScript:script sourceURL:NULL];
+}
+
+- (JSValueRef)evaluateScript:(NSString *)script sourceURL:(NSString *)sourceURL {
 	if( !script || script.length == 0 ) {
-		NSLog(@"Error: No or empty script given");
-		return;
+		NSLog(
+			@"Error: The script %@ does not exist or appears to be empty.",
+			sourceURL ? sourceURL : @"[Anonymous]"
+		);
+		return NULL;
 	}
     
 	JSStringRef scriptJS = JSStringCreateWithCFString((CFStringRef)script);
@@ -188,7 +227,7 @@
 	}
     
 	JSValueRef exception = NULL;
-	JSEvaluateScript(jsGlobalContext, scriptJS, NULL, sourceURLJS, 0, &exception );
+	JSValueRef ret = JSEvaluateScript(jsGlobalContext, scriptJS, NULL, sourceURLJS, 0, &exception );
 	[self logException:exception ctx:jsGlobalContext];
 	
 	JSStringRelease( scriptJS );
@@ -196,6 +235,7 @@
 	if ( sourceURLJS ) {
 		JSStringRelease( sourceURLJS );
 	}
+	return ret;
 }
 
 - (JSValueRef)loadModuleWithId:(NSString *)moduleId module:(JSValueRef)module exports:(JSValueRef)exports {
@@ -264,6 +304,20 @@
 	JSStringRelease( jsFilePropertyName );
 }
 
+- (JSValueRef)jsValueForPath:(NSString *)objectPath {
+	JSValueRef obj = JSContextGetGlobalObject( jsGlobalContext  );
+	
+	NSArray *pathComponents = [objectPath componentsSeparatedByString:@"."];
+	for( NSString *p in pathComponents) {
+		JSStringRef name = JSStringCreateWithCFString((CFStringRef)p);
+		obj = JSObjectGetProperty( jsGlobalContext, (JSObjectRef)obj, name, NULL);
+		JSStringRelease(name);
+		
+		if( !obj ) { break; }
+	}
+	return obj;
+}
+
 
 #pragma mark -
 #pragma mark Run loop
@@ -287,7 +341,7 @@
 - (void)pause {
 	if( isPaused ) { return; }
 	
-	[lifecycleDelegate pause];
+	[windowEventsDelegate pause];
 	[displayLink removeFromRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
 	[screenRenderingContext finish];
 	isPaused = true;
@@ -296,7 +350,7 @@
 - (void)resume {
 	if( !isPaused ) { return; }
 	
-	[lifecycleDelegate resume];
+	[windowEventsDelegate resume];
 	[EAGLContext setCurrentContext:glCurrentContext];
 	[displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
 	isPaused = false;
@@ -304,6 +358,10 @@
 
 - (void)clearCaches {
 	JSGarbageCollect(jsGlobalContext);
+	
+	// Release all texture storages that haven't been bound in
+	// the last 5 seconds
+	[textureCache releaseStoragesOlderThan:5];
 }
 
 - (void)setCurrentRenderingContext:(EJCanvasContext *)renderingContext {
@@ -374,6 +432,17 @@
 	
 	[timers cancelId:JSValueToNumberFast(ctxp, argv[0])];
 	return NULL;
+}
+
+- (JSObjectRef)createFunctionWithBlock:(JSValueRef (^)(JSContextRef ctx, size_t argc, const JSValueRef argv[]))block {
+	if( !jsBlockFunctionClass ) {
+		JSClassDefinition blockFunctionClassDef = kJSClassDefinitionEmpty;
+		blockFunctionClassDef.callAsFunction = EJBlockFunctionCallAsFunction;
+		blockFunctionClassDef.finalize = EJBlockFunctionFinalize;
+		jsBlockFunctionClass = JSClassCreate(&blockFunctionClassDef);
+	}
+	
+	return JSObjectMake( jsGlobalContext, jsBlockFunctionClass, (void *)Block_copy(block) );
 }
 
 @end

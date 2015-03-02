@@ -1,6 +1,7 @@
 #import "EJBindingImage.h"
 #import "EJJavaScriptView.h"
 #import "EJNonRetainingProxy.h"
+#import "EJTexture.h"
 
 @implementation EJBindingImage
 @synthesize texture;
@@ -14,8 +15,21 @@
 	// may be the only thing holding on to it
 	JSValueProtect(scriptView.jsGlobalContext, jsObject);
 	
-	NSLog(@"Loading Image: %@", path);
-	NSString *fullPath = [scriptView pathForResource:path];
+	NSString *fullPath;
+
+	// If path is a Data URI or remote URL we don't want to prepend resource paths
+	if( [path hasPrefix:@"data:"] ) {
+		NSLog(@"Loading Image from Data URI");
+		fullPath = path;
+	}
+	else if( [path hasPrefix:@"http:"] || [path hasPrefix:@"https:"] ) {
+		NSLog(@"Loading Image from URL: %@", path);
+		fullPath = path;
+	}
+	else {
+		NSLog(@"Loading Image (lazy): %@", path);
+		fullPath = [scriptView pathForResource:path];
+	}
 	
 	// Use a non-retaining proxy for the callback operation and take care that the
 	// loadCallback is always cancelled when dealloc'ing
@@ -38,6 +52,7 @@
 	[loadCallback release];
 	
 	[texture release];
+	
 	[path release];
 	[super dealloc];
 }
@@ -47,15 +62,23 @@
 	[loadCallback release];
 	loadCallback = nil;
 	
-	[self triggerEvent:(texture.textureId ? @"load" : @"error") argc:0 argv:NULL];		
+	if( texture.lazyLoaded || texture.textureId ) {
+		[self triggerEvent:@"load"];
+	}
+	else {
+		[self triggerEvent:@"error"];
+	}
+	
 	JSValueUnprotect(scriptView.jsGlobalContext, jsObject);
 }
 
-EJ_BIND_GET(src, ctx ) { 
-	JSStringRef src = JSStringCreateWithUTF8CString( [path UTF8String] );
-	JSValueRef ret = JSValueMakeString(ctx, src);
-	JSStringRelease(src);
-	return ret;
+- (void)setTexture:(EJTexture *)texturep path:(NSString *)pathp {
+	texture = [texturep retain];
+	path = [pathp retain];
+}
+
+EJ_BIND_GET(src, ctx ) {
+	return NSStringToJSValue(ctx, path ? path : @"");
 }
 
 EJ_BIND_SET(src, ctx, value) {
@@ -73,31 +96,34 @@ EJ_BIND_SET(src, ctx, value) {
 	if( path ) {
 		[path release];
 		path = nil;
-		
+	}
+	
+	if( texture ) {
 		[texture release];
 		texture = nil;
 	}
 	
-	if( [newPath length] ) {
+	if( !JSValueIsNull(ctx, value) && newPath.length ) {
 		path = [newPath retain];
 		[self beginLoad];
 	}
 }
 
 EJ_BIND_GET(width, ctx ) {
-	return JSValueMakeNumber( ctx, texture ? (texture.width / texture.contentScale) : 0);
+	return JSValueMakeNumber( ctx, texture.width / texture.contentScale );
 }
 
-EJ_BIND_GET(height, ctx ) { 
-	return JSValueMakeNumber( ctx, texture ? (texture.height / texture.contentScale) : 0 );
+EJ_BIND_GET(height, ctx ) {
+	return JSValueMakeNumber( ctx, texture.height / texture.contentScale );
 }
 
 EJ_BIND_GET(complete, ctx ) {
-	return JSValueMakeBoolean(ctx, (texture && texture.textureId) );
+	return JSValueMakeBoolean(ctx, (texture && (texture.lazyLoaded || texture.textureId)) );
 }
 
 EJ_BIND_EVENT(load);
 EJ_BIND_EVENT(error);
 
+EJ_BIND_CONST(nodeName, "IMG");
 
 @end

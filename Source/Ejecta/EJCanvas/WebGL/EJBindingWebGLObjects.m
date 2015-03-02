@@ -10,7 +10,12 @@
 	return self;
 }
 
+- (void)invalidate {
+	index = 0;
+}
+
 - (void)dealloc {
+	[self invalidate];
 	[webglContext release];
 	[super dealloc];
 }
@@ -18,8 +23,15 @@
 + (GLuint)indexFromJSValue:(JSValueRef)value {
 	if( !value ) { return 0; }
 	
-	EJBindingWebGLObject *binding = (EJBindingWebGLObject *)JSObjectGetPrivate((JSObjectRef)value);
-	return (binding && [binding isMemberOfClass:[self class]]) ? binding->index : 0;
+	EJBindingWebGLObject *binding = (EJBindingWebGLObject *)JSValueGetPrivate(value);
+	return (binding && [binding isKindOfClass:[self class]]) ? binding->index : 0;
+}
+
++ (EJBindingWebGLObject *)webGLObjectFromJSValue:(JSValueRef)value {
+	if( !value ) { return nil; }
+	
+	EJBindingWebGLObject *binding = (EJBindingWebGLObject *)JSValueGetPrivate(value);
+	return (binding && [binding isKindOfClass:[self class]]) ? binding : nil;
 }
 
 + (JSObjectRef)createJSObjectWithContext:(JSContextRef)ctx
@@ -38,25 +50,25 @@
 
 
 @implementation EJBindingWebGLBuffer
-- (void)dealloc {
+- (void)invalidate {
 	[webglContext deleteBuffer:index];
-	[super dealloc];
+	[super invalidate];
 }
 @end
 
 
 @implementation EJBindingWebGLProgram
-- (void)dealloc {
+- (void)invalidate {
 	[webglContext deleteProgram:index];
-	[super dealloc];
+	[super invalidate];
 }
 @end
 
 
 @implementation EJBindingWebGLShader
-- (void)dealloc {
+- (void)invalidate {
 	[webglContext deleteShader:index];
-	[super dealloc];
+	[super invalidate];
 }
 @end
 
@@ -70,19 +82,20 @@
 	return self;
 }
 
-- (void)dealloc {
+- (void)invalidate {
 	if( texture.textureId ) {
 		[webglContext deleteTexture:texture.textureId];
 	}
 	[texture release];
-	[super dealloc];
+	texture = nil;
+	[super invalidate];
 }
 
 + (EJTexture *)textureFromJSValue:(JSValueRef)value {
 	if( !value ) { return NULL; }
 	
-	EJBindingWebGLTexture *binding = (EJBindingWebGLTexture *)JSObjectGetPrivate((JSObjectRef)value);
-	return (binding && [binding isMemberOfClass:[self class]]) ? binding->texture : NULL;
+	EJBindingWebGLTexture *binding = (EJBindingWebGLTexture *)JSValueGetPrivate(value);
+	return (binding && [binding isKindOfClass:[self class]]) ? binding->texture : NULL;
 }
 
 + (JSObjectRef)createJSObjectWithContext:(JSContextRef)ctx
@@ -104,23 +117,23 @@
 
 
 @implementation EJBindingWebGLRenderbuffer
-- (void)dealloc {
+- (void)invalidate {
 	[webglContext deleteRenderbuffer:index];
-	[super dealloc];
+	[super invalidate];
 }
 @end
 
 @implementation EJBindingWebGLFramebuffer
-- (void)dealloc {
+- (void)invalidate {
 	[webglContext deleteFramebuffer:index];
-	[super dealloc];
+	[super invalidate];
 }
 @end
 
 @implementation EJBindingWebGLVertexArrayObjectOES
-- (void)dealloc {
+- (void)invalidate {
 	[webglContext deleteVertexArray:index];
-	[super dealloc];
+	[super invalidate];
 }
 @end
 

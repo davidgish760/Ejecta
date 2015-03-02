@@ -6,6 +6,7 @@
 
 // Make 'window' the global scope
 self = window = this;
+window.top = window.parent = window;
 
 (function(window) {
 
@@ -17,28 +18,40 @@ window.devicePixelRatio = ej.devicePixelRatio;
 window.innerWidth = ej.screenWidth;
 window.innerHeight = ej.screenHeight;
 
+Object.defineProperty(window, 'orientation', {
+    get: function() {return ej.orientation; }
+});
+
 window.screen = {
 	availWidth: window.innerWidth,
 	availHeight: window.innerHeight
 };
 
+var geolocation = null;
 window.navigator = {
 	language: ej.language,
 	userAgent: ej.userAgent,
 	appVersion: ej.appVersion,
-	get onLine() { return ej.onLine; } // re-evaluate on each get
+	platform: ej.platform,
+	get onLine() { return ej.onLine; }, // re-evaluate on each get
+	get geolocation(){ // Lazily create geolocation instance
+		geolocation = geolocation || new Ejecta.Geolocation();
+		return geolocation;
+	}
 };
 
 // Create the default screen canvas
 window.canvas = new Ejecta.Canvas();
 window.canvas.type = 'canvas';
-window.canvas.style = {};
 
 // The console object
 window.console = {
-	log: function() {
-		var args = Array.prototype.join.call(arguments, ', ');
-		ej.log( args );
+	_log: function(level, args) {
+		var txt = level + ':';
+		for (var i = 0; i < args.length; i++) {
+			txt += ' ' + (typeof args[i] === 'string' ? args[i] : JSON.stringify(args[i]));
+		}
+		ej.log( txt );
 	},
 	
 	assert: function() {
@@ -49,11 +62,28 @@ window.console = {
 		}
 	}
 };
-window.console.debug =
-	window.console.info =
-	window.console.warn =
-	window.console.error =
-	window.console.log;
+window.console.debug = function () { window.console._log('DEBUG', arguments); };
+window.console.info =  function () { window.console._log('INFO', arguments); };
+window.console.warn =  function () { window.console._log('WARN', arguments); };
+window.console.error = function () { window.console._log('ERROR', arguments); };
+window.console.log =   function () { window.console._log('LOG', arguments); };
+
+var consoleTimers = {};
+console.time = function(name) {
+	consoleTimers[name] = ej.performanceNow();
+};
+
+console.timeEnd = function(name) {
+	var timeStart = consoleTimers[name];
+	if( !timeStart ) {
+		return;
+	}
+
+	var timeElapsed = ej.performanceNow() - timeStart;
+	console.log(name + ": " + timeElapsed + "ms");
+	delete consoleTimers[name];
+};
+
 
 // CommonJS style require()
 var loadedModules = {};
@@ -62,7 +92,7 @@ window.require = function( name ) {
 	if( !loadedModules[id] ) {
 		var exports = {};
 		var module = { id: id, uri: id + '.js', exports: exports };
-		ejecta.requireModule( id, module, exports );
+		window.ejecta.requireModule( id, module, exports );
 		// Some modules override module.exports, so use the module.exports reference only after loading the module
 		loadedModules[id] = module.exports;
 	}
@@ -71,11 +101,17 @@ window.require = function( name ) {
 };
 
 // Timers
-window.setTimeout = function(cb, t){ return ej.setTimeout(cb, t); };
-window.setInterval = function(cb, t){ return ej.setInterval(cb, t); };
+window.performance = {now: function() {return ej.performanceNow();} };
+window.setTimeout = function(cb, t){ return ej.setTimeout(cb, t||0); };
+window.setInterval = function(cb, t){ return ej.setInterval(cb, t||0); };
 window.clearTimeout = function(id){ return ej.clearTimeout(id); };
 window.clearInterval = function(id){ return ej.clearInterval(id); };
-window.requestAnimationFrame = function(cb, element){ return ej.setTimeout(cb, 16); };
+window.requestAnimationFrame = function(cb, element){
+	return ej.setTimeout(function(){ cb(ej.performanceNow()); }, 16);
+};
+window.cancelAnimationFrame = function (id) {
+	return ej.clearTimeout(id);
+};
 
 
 // The native Image, Audio, HttpRequest and LocalStorage class mimic the real elements
@@ -87,9 +123,27 @@ window.localStorage = new Ejecta.LocalStorage();
 window.WebSocket = Ejecta.WebSocket;
 
 
+window.Event = function (type) {
+	this.type = type;
+	this.cancelBubble = false;
+	this.cancelable = false;
+	this.target = null;
+	
+	this.initEvent = function (type, bubbles, cancelable) {
+		this.type = type;
+		this.cancelBubble = bubbles;
+		this.cancelable = cancelable;
+	};
+
+	this.preventDefault = function () {};
+	this.stopPropagation = function () {};
+};
+
+window.location = { href: 'index' };
+
 // Set up a "fake" HTMLElement
-HTMLElement = function( tagName ){ 
-	this.tagName = tagName;
+HTMLElement = function( tagName ){
+	this.tagName = tagName.toUpperCase();
 	this.children = [];
 	this.style = {};
 };
@@ -98,20 +152,64 @@ HTMLElement.prototype.appendChild = function( element ) {
 	this.children.push( element );
 	
 	// If the child is a script element, begin to load it
-	if( element.tagName == 'script' ) {
+	if( element.tagName && element.tagName.toLowerCase() == 'script' ) {
 		ej.setTimeout( function(){
 			ej.include( element.src );
 			if( element.onload ) {
-				element.onload();
+				element.onload({
+					type: 'load',
+					currentTarget: element
+				});
 			}
 		}, 1);
 	}
 };
 
+HTMLElement.prototype.insertBefore = function( newElement, existingElement ) {
+	// Just append; we don't care about order here
+	this.children.push( newElement );
+};
+
+HTMLElement.prototype.removeChild = function( node ) {
+	for( var i = this.children.length; i--; ) {
+		if( this.children[i] === node ) {
+			this.children.splice(i, 1);
+		}
+	}
+};
+
+HTMLElement.prototype.getBoundingClientRect = function() {
+	return {top: 0, left: 0, width: window.innerWidth, height: window.innerHeight};
+};
+
+HTMLElement.prototype.setAttribute = function(attr, value){
+	this[attr] = value;
+};
+
+HTMLElement.prototype.getAttribute = function(attr){
+	return this[attr];
+};
+
+HTMLElement.prototype.addEventListener = function(event, method){
+	if (event === 'load') {
+		this.onload = method;
+	}
+};
+
+HTMLElement.prototype.removeEventListener = function(event, method){
+	if (event === 'load') {
+		this.onload = undefined;
+	}
+};
 
 // The document object
 window.document = {
-	location: { href: 'index' },
+	readystate: 'complete',
+	documentElement: window,
+	location: window.location,
+	visibilityState: 'visible',
+	hidden: false,
+	style: {},
 	
 	head: new HTMLElement( 'head' ),
 	body: new HTMLElement( 'body' ),
@@ -122,7 +220,6 @@ window.document = {
 		if( name === 'canvas' ) {
 			var canvas = new Ejecta.Canvas();
 			canvas.type = 'canvas';
-			canvas.style = {};
 			return canvas;
 		}
 		else if( name == 'audio' ) {
@@ -135,7 +232,7 @@ window.document = {
 			return new window.Image();
 		}
 		else if (name === 'input' || name === 'textarea') {
-  			return new Ejecta.KeyInput();
+			return new Ejecta.KeyInput();
  		}
 		return new HTMLElement( name );
 	},
@@ -148,13 +245,30 @@ window.document = {
 	},
 	
 	getElementsByTagName: function( tagName ) {
+		var elements = [], children, i;
+
+		tagName = tagName.toLowerCase();
+
 		if( tagName === 'head' ) {
-			return [document.head];
+			elements.push(document.head);
 		}
 		else if( tagName === 'body' ) {
-			return [document.body];
+			elements.push(document.body);
 		}
-		return [];
+		else {
+			children = document.body.children;
+			for (i = 0; i < children.length; i++) {
+				if (children[i].tagName.toLowerCase() === tagName) {
+					elements.push(children[i]);
+				}
+			}
+			children = undefined;
+		}
+		return elements;
+	},
+
+	createEvent: function (type) { 
+		return new window.Event(type); 
 	},
 	
 	addEventListener: function( type, callback, useCapture ){
@@ -186,7 +300,7 @@ window.document = {
 	},
 	
 	_eventInitializers: {},
-	_publishEvent: function( event ) {
+	dispatchEvent: function( event ) {
 		var listeners = this.events[ event.type ];
 		if( !listeners ) { return; }
 		
@@ -195,11 +309,18 @@ window.document = {
 		}
 	}
 };
-window.canvas.addEventListener = window.addEventListener = function( type, callback ) { 
-	window.document.addEventListener(type,callback); 
+
+window.canvas.addEventListener = window.addEventListener = function( type, callback ) {
+	window.document.addEventListener(type,callback);
 };
-window.canvas.removeEventListener = window.removeEventListener = function( type, callback ) { 
-	window.document.removeEventListener(type,callback); 
+window.canvas.removeEventListener = window.removeEventListener = function( type, callback ) {
+	window.document.removeEventListener(type,callback);
+};
+window.canvas.getBoundingClientRect = function() {
+	return {
+		top: this.offsetTop, left: this.offsetLeft,
+		width: this.offsetWidth, height: this.offsetHeight
+	};
 };
 
 var eventInit = document._eventInitializers;
@@ -208,13 +329,16 @@ var eventInit = document._eventInitializers;
 
 // Touch events
 
+// Set touch event properties for feature detection
+window.ontouchstart = window.ontouchend = window.ontouchmove = null;
+
 // Setting up the 'event' object for touch events in native code is quite
 // a bit of work, so instead we do it here in JavaScript and have the native
 // touch class just call a simple callback.
 var touchInput = null;
 var touchEvent = {
-	type: 'touchstart', 
-	target: canvas,
+	type: 'touchstart',
+	target: window.canvas,
 	touches: null,
 	targetTouches: null,
 	changedTouches: null,
@@ -222,21 +346,21 @@ var touchEvent = {
 	stopPropagation: function(){}
 };
 
-var publishTouchEvent = function( type, all, changed ) {
+var dispatchTouchEvent = function( type, all, changed ) {
 	touchEvent.touches = all;
 	touchEvent.targetTouches = all;
 	touchEvent.changedTouches = changed;
 	touchEvent.type = type;
 	
-	document._publishEvent( touchEvent );
+	document.dispatchEvent( touchEvent );
 };
 eventInit.touchstart = eventInit.touchend = eventInit.touchmove = function() {
 	if( touchInput ) { return; }
 
 	touchInput = new Ejecta.TouchInput();
-	touchInput.ontouchstart = function( all, changed ){ publishTouchEvent( 'touchstart', all, changed ); };
-	touchInput.ontouchend = function( all, changed ){ publishTouchEvent( 'touchend', all, changed ); };
-	touchInput.ontouchmove = function( all, changed ){ publishTouchEvent( 'touchmove', all, changed ); };
+	touchInput.ontouchstart = function( all, changed ){ dispatchTouchEvent( 'touchstart', all, changed ); };
+	touchInput.ontouchend = function( all, changed ){ dispatchTouchEvent( 'touchend', all, changed ); };
+	touchInput.ontouchmove = function( all, changed ){ dispatchTouchEvent( 'touchmove', all, changed ); };
 };
 
 
@@ -245,8 +369,8 @@ eventInit.touchstart = eventInit.touchend = eventInit.touchmove = function() {
 
 var deviceMotion = null;
 var deviceMotionEvent = {
-	type: 'devicemotion', 
-	target: canvas,
+	type: 'devicemotion',
+	target: window.canvas,
 	interval: 16,
 	acceleration: {x: 0, y: 0, z: 0},
 	accelerationIncludingGravity: {x: 0, y: 0, z: 0},
@@ -256,8 +380,8 @@ var deviceMotionEvent = {
 };
 
 var deviceOrientationEvent = {
-	type: 'deviceorientation', 
-	target: canvas,
+	type: 'deviceorientation',
+	target: window.canvas,
 	alpha: null,
 	beta: null,
 	gamma: null,
@@ -286,14 +410,14 @@ eventInit.deviceorientation = eventInit.devicemotion = function() {
 		deviceMotionEvent.rotationRate.beta = ry;
 		deviceMotionEvent.rotationRate.gamma = rz;
 
-		document._publishEvent( deviceMotionEvent );
+		document.dispatchEvent( deviceMotionEvent );
 
 
 		deviceOrientationEvent.alpha = ox;
 		deviceOrientationEvent.beta = oy;
 		deviceOrientationEvent.gamma = oz;
 
-		document._publishEvent( deviceOrientationEvent );
+		document.dispatchEvent( deviceOrientationEvent );
 	};
 	
 	// Callback for Devices that only have an accelerometer
@@ -305,15 +429,16 @@ eventInit.deviceorientation = eventInit.devicemotion = function() {
 		deviceMotionEvent.acceleration = null;
 		deviceMotionEvent.rotationRate = null;
 	
-		document._publishEvent( deviceMotionEvent );
-	}
+		document.dispatchEvent( deviceMotionEvent );
+	};
 };
 
 
 
-// Application lifecycle events (pagehide/pageshow)
+// Window events (resize/pagehide/pageshow)
 
-var lifecycle = null;
+var windowEvents = null;
+
 var lifecycleEvent = {
 	type: 'pagehide',
 	target: window.document,
@@ -321,19 +446,48 @@ var lifecycleEvent = {
 	stopPropagation: function(){}
 };
 
-eventInit.pagehide = eventInit.pageshow = function() {
-	if( !lifecycle ) {
-		lifecycle = new Ejecta.Lifecycle();
-		
-		lifecycle.onpagehide = function() {
-			lifecycleEvent.type = 'pagehide';
-			document._publishEvent( lifecycleEvent );
-		};
-		lifecycle.onpageshow = function() {
-			lifecycleEvent.type = 'pageshow';
-			document._publishEvent( lifecycleEvent );
-		}
-	}
+var resizeEvent = {
+	type: 'resize',
+	target: window,
+	preventDefault: function(){},
+	stopPropagation: function(){}
+};
+
+var visibilityEvent = {
+	type: 'visibilitychange',
+	target: window.document,
+	preventDefault: function(){},
+	stopPropagation: function(){}
+};
+
+eventInit.visibilitychange = eventInit.pagehide = eventInit.pageshow = eventInit.resize = function() {
+	if( windowEvents ) { return; }
+	
+	windowEvents = new Ejecta.WindowEvents();
+	
+	windowEvents.onpagehide = function() {
+		document.hidden = true;
+		document.visibilityState = 'hidden';
+		document.dispatchEvent( visibilityEvent );
+	
+		lifecycleEvent.type = 'pagehide';
+		document.dispatchEvent( lifecycleEvent );
+	};
+	
+	windowEvents.onpageshow = function() {
+		document.hidden = false;
+		document.visibilityState = 'visible';
+		document.dispatchEvent( visibilityEvent );
+	
+		lifecycleEvent.type = 'pageshow';
+		document.dispatchEvent( lifecycleEvent );
+	};
+
+	windowEvents.onresize = function() {
+		window.innerWidth = ej.screenWidth;
+		window.innerHeight = ej.screenHeight;
+		document.dispatchEvent(resizeEvent);
+	};
 };
 
 })(this);

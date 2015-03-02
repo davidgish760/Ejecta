@@ -2,10 +2,6 @@
 #import "EJBindingBase.h"
 #import "EJJavaScriptView.h"
 
-
-static JSClassRef EJGlobalConstructorClass;
-static NSMutableDictionary *EJGlobalJSClassCache;
-
 typedef struct {
 	Class class;
 	EJJavaScriptView *scriptView;
@@ -27,7 +23,7 @@ JSValueRef EJGetNativeClass(JSContextRef ctx, JSObjectRef object, JSStringRef pr
 		classWithScriptView->class = class;
 		classWithScriptView->scriptView = scriptView;
 		
-		obj = JSObjectMake( ctx, EJGlobalConstructorClass, (void *)classWithScriptView );
+		obj = JSObjectMake( ctx, scriptView.classLoader.jsConstructorClass, (void *)classWithScriptView );
 	}
 	
 	CFRelease(className);
@@ -58,7 +54,7 @@ bool EJConstructorHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValue
 
 	// Unpack the class and instance from private data
 	EJClassWithScriptView *classWithScriptView = (EJClassWithScriptView *)JSObjectGetPrivate(constructor);
-	id instance = JSObjectGetPrivate((JSObjectRef)possibleInstance);
+	id instance = JSValueGetPrivate(possibleInstance);
 	
 	if( !classWithScriptView || !instance ) {
 		return false;
@@ -69,26 +65,68 @@ bool EJConstructorHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValue
 
 
 @implementation EJClassLoader
+@synthesize jsConstructorClass;
 
-+ (JSClassRef)getJSClass:(id)class {
-	NSAssert(EJGlobalJSClassCache != nil, @"Attempt to access class cache without a loader present.");
-	
-	// Try the cache first
-	JSClassRef jsClass = [EJGlobalJSClassCache[class] pointerValue];
-	if( jsClass ) {
-		return jsClass;
+- (id)initWithScriptView:(EJJavaScriptView *)scriptView name:(NSString *)name {
+	if( self = [super init] ) {
+		JSGlobalContextRef context = scriptView.jsGlobalContext;
+		
+		// Create the constructor class
+		JSClassDefinition constructorClassDef = kJSClassDefinitionEmpty;
+		constructorClassDef.callAsConstructor = EJCallAsConstructor;
+		constructorClassDef.hasInstance = EJConstructorHasInstance;
+		constructorClassDef.finalize = EJConstructorFinalize;
+		jsConstructorClass = JSClassCreate(&constructorClassDef);
+		
+		// Create the collection class and attach it to the global context with
+		// the given name
+		JSClassDefinition loaderClassDef = kJSClassDefinitionEmpty;
+		loaderClassDef.getProperty = EJGetNativeClass;
+		JSClassRef loaderClass = JSClassCreate(&loaderClassDef);
+		
+		JSObjectRef global = JSContextGetGlobalObject(context);
+		
+		JSObjectRef loader = JSObjectMake(context, loaderClass, scriptView);
+		JSStringRef jsName = JSStringCreateWithUTF8CString(name.UTF8String);
+		JSObjectSetProperty(
+			context, global, jsName, loader,
+			(kJSPropertyAttributeDontDelete | kJSPropertyAttributeReadOnly),
+			NULL
+		);
+		JSStringRelease(jsName);
+		
+		
+		// Create Class cache dict
+		classCache = [[NSMutableDictionary alloc] initWithCapacity:16];
 	}
-	
-	// Still here? Create and insert into cache
-	jsClass = [self createJSClass:class];
-	EJGlobalJSClassCache[class] = [NSValue valueWithPointer:jsClass];
-	return jsClass;
+	return self;
 }
 
-+ (JSClassRef)createJSClass:(id)class {
+- (void)dealloc {
+	[classCache release];
+	JSClassRelease(jsConstructorClass);
+	[super dealloc];
+}
+
+- (EJLoadedJSClass *)getJSClass:(id)class {
+	// Try the cache first
+	EJLoadedJSClass *loadedClass = classCache[class];
+	if( loadedClass ) {
+		return loadedClass;
+	}
+	
+	// Still here? Load and insert into cache
+	loadedClass = [self loadJSClass:class];
+	classCache[class] = loadedClass;
+	
+	return loadedClass;
+}
+
+- (EJLoadedJSClass *)loadJSClass:(id)class {
 	// Gather all class methods that return C callbacks for this class or it's parents
 	NSMutableArray *methods = [[NSMutableArray alloc] init];
 	NSMutableArray *properties = [[NSMutableArray alloc] init];
+	NSMutableDictionary *constantValues = [[NSMutableDictionary alloc] init];
 		
 	// Traverse this class and all its super classes
 	Class base = EJBindingBase.class;
@@ -103,11 +141,15 @@ bool EJConstructorHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValue
 			NSString *name = NSStringFromSelector(selector);
 			
 			if( [name hasPrefix:@"_ptr_to_func_"] ) {
-				[methods addObject: [name substringFromIndex:sizeof("_ptr_to_func_")-1] ];
+				[methods addObject:[name substringFromIndex:sizeof("_ptr_to_func_")-1] ];
 			}
 			else if( [name hasPrefix:@"_ptr_to_get_"] ) {
 				// We only look for getters - a property that has a setter, but no getter will be ignored
-				[properties addObject: [name substringFromIndex:sizeof("_ptr_to_get_")-1] ];
+				[properties addObject:[name substringFromIndex:sizeof("_ptr_to_get_")-1] ];
+			}
+			else if( [name hasPrefix:@"_const_"] ) {
+				NSObject *constant = [class performSelector:NSSelectorFromString(name)];
+				[constantValues setObject:constant forKey:[name substringFromIndex:sizeof("_const_")-1]];
 			}
 		}
 		free(methodList);
@@ -160,69 +202,35 @@ bool EJConstructorHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValue
 	[properties release];
 	[methods release];
 	
-	return jsClass;
+	EJLoadedJSClass *loadedClass = [[EJLoadedJSClass alloc] initWithJSClass:jsClass constantValues:constantValues];
+	
+	// The JSClass and constantValues dict are now retained by the loadedClass instance
+	JSClassRelease(jsClass);
+	[constantValues release];
+	
+	return [loadedClass autorelease];
 }
 
-- (id)initWithScriptView:(EJJavaScriptView *)scriptView name:(NSString *)name {
+@end
+
+
+@implementation EJLoadedJSClass
+@synthesize jsClass, constantValues;
+
+- (id)initWithJSClass:(JSClassRef)jsClassp constantValues:(NSDictionary *)constantValuesp {
 	if( self = [super init] ) {
-		JSGlobalContextRef context = scriptView.jsGlobalContext;
-		
-		// Create or retain the global constructor class
-		if( !EJGlobalConstructorClass ) {
-			JSClassDefinition constructorClassDef = kJSClassDefinitionEmpty;
-			constructorClassDef.callAsConstructor = EJCallAsConstructor;
-			constructorClassDef.hasInstance = EJConstructorHasInstance;
-			constructorClassDef.finalize = EJConstructorFinalize;
-			EJGlobalConstructorClass = JSClassCreate(&constructorClassDef);
-		}
-		else {
-			JSClassRetain(EJGlobalConstructorClass);
-		}
-		
-		// Create the collection class and attach it to the global context with
-		// the given name
-		JSClassDefinition loaderClassDef = kJSClassDefinitionEmpty;
-		loaderClassDef.getProperty = EJGetNativeClass;
-		JSClassRef loaderClass = JSClassCreate(&loaderClassDef);
-		
-		JSObjectRef global = JSContextGetGlobalObject(context);
-		
-		JSObjectRef loader = JSObjectMake(context, loaderClass, scriptView);
-		JSStringRef jsName = JSStringCreateWithUTF8CString(name.UTF8String);
-		JSObjectSetProperty(
-			context, global, jsName, loader,
-			(kJSPropertyAttributeDontDelete | kJSPropertyAttributeReadOnly),
-			NULL
-		);
-		JSStringRelease(jsName);
-		
-		
-		// Create or retain the global Class cache
-		if( !EJGlobalJSClassCache ) {
-			EJGlobalJSClassCache = [[NSMutableDictionary alloc] initWithCapacity:16];
-		}
-		else {
-			[EJGlobalJSClassCache retain];
-		}
+		jsClass = JSClassRetain(jsClassp);
+		constantValues = [constantValuesp retain];
 	}
 	return self;
 }
 
 - (void)dealloc {
-	// If we are the last Collection to hold on to the Class cache, release it and
-	// set it to nil, so it can be properly re-created if needed.
-	if( EJGlobalJSClassCache.retainCount == 1 ) {
-		[EJGlobalJSClassCache release];
-		EJGlobalJSClassCache = nil;
-	}
-	else {
-		[EJGlobalJSClassCache release];
-	}
-	
-	JSClassRelease(EJGlobalConstructorClass);
+	JSClassRelease(jsClass);
+	[constantValues release];
 	[super dealloc];
 }
 
-
 @end
+
 

@@ -19,12 +19,12 @@ static const EJVideoScalingMode EJVideoToMPMovieScalingMode[] = {
 }
 
 - (void)prepareGarbageCollection {
-	[player stop];
-	[player.view removeFromSuperview];
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)dealloc {
 	[player stop];
+	[player.view removeFromSuperview];
 	[player release];
 	[path release];
 	[super dealloc];
@@ -49,16 +49,6 @@ EJ_BIND_ENUM(scalingMode, scalingMode,
 
 EJ_BIND_GET(duration, ctx) {
 	return JSValueMakeNumber(ctx, player.duration);
-}
-
-EJ_BIND_GET(volume, ctx) {
-	return JSValueMakeNumber( ctx, [MPMusicPlayerController applicationMusicPlayer].volume );
-}
-
-EJ_BIND_SET(volume, ctx, value) {
-	// FIXME: doesn't work in newer iOS versions
-	float volume = MIN(1,MAX(JSValueToNumberFast(ctx, value),0));
-	[[MPMusicPlayerController applicationMusicPlayer] setVolume:volume];
 }
 
 EJ_BIND_GET(loop, ctx) {
@@ -91,10 +81,16 @@ EJ_BIND_GET(src, ctx) {
 }
 
 EJ_BIND_SET(src, ctx, value) {
-	[player stop]; [player release]; player = nil;
-	[path release]; path = nil;
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
+	[player stop];
+	[player.view removeFromSuperview];
+	[player release];
+	player = nil;
 	
-	path = JSValueToNSString(ctx, value);
+	[path release];
+	path = nil;
+	
+	path = [JSValueToNSString(ctx, value) retain];
 	
 	NSURL *url = [NSURL URLWithString:path];
 	if( !url.host ) {
@@ -109,7 +105,7 @@ EJ_BIND_SET(src, ctx, value) {
 	
 	UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc]
 		initWithTarget:self action:@selector(didTap:)];
-    tapGesture.delegate = self;
+	tapGesture.delegate = self;
 	tapGesture.numberOfTapsRequired = 1;
 	[player.view addGestureRecognizer:tapGesture];
 	[tapGesture release];
@@ -129,19 +125,19 @@ EJ_BIND_SET(src, ctx, value) {
 - (void)preparedToPlayChange:(MPMoviePlayerController *)moviePlayer {
 	if( player.isPreparedToPlay && !loaded ) {
 		loaded = YES;
-		[self triggerEvent:@"canplaythrough" argc:0 argv:NULL];
-		[self triggerEvent:@"loadedmetadata" argc:0 argv:NULL];
+		[self triggerEvent:@"canplaythrough"];
+		[self triggerEvent:@"loadedmetadata"];
 	}
 }
 
 - (void)didTap:(UIGestureRecognizer *)gestureRecognizer {
-	[self triggerEvent:@"click" argc:0 argv:NULL];
+	[self triggerEvent:@"click"];
 }
 
 - (void)didFinish:(MPMoviePlayerController *)moviePlayer {
 	player.fullscreen = NO;
 	[player.view removeFromSuperview];
-	[self triggerEvent:@"ended" argc:0 argv:NULL];
+	[self triggerEvent:@"ended"];
 }
 
 EJ_BIND_GET(ended, ctx) {
@@ -180,18 +176,20 @@ EJ_BIND_FUNCTION(load, ctx, argc, argv) {
 }
 
 EJ_BIND_FUNCTION(canPlayType, ctx, argc, argv) {
-	if( argc != 1 ) return NULL;
+	if( argc != 1 ) return NSStringToJSValue(ctx, @"");
 	
 	NSString *mime = JSValueToNSString(ctx, argv[0]);
 	if( [mime hasPrefix:@"video/mp4"] ) {
 		return NSStringToJSValue(ctx, @"probably");
 	}
-	return NULL;
+	return NSStringToJSValue(ctx, @"");
 }
 
 EJ_BIND_EVENT(canplaythrough);
 EJ_BIND_EVENT(loadedmetadata);
 EJ_BIND_EVENT(ended);
 EJ_BIND_EVENT(click);
+
+EJ_BIND_CONST(nodeName, "VIDEO");
 
 @end

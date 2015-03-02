@@ -2,13 +2,23 @@
 
 #import <netinet/in.h>
 #import <sys/utsname.h>
+#import <sys/types.h>
+#import <sys/sysctl.h>
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <AVFoundation/AVFoundation.h>
 
 #import "EJJavaScriptView.h"
 
 @implementation EJBindingEjectaCore
 
-- (NSString*) deviceName {
+- (id)initWithContext:(JSContextRef)ctx argc:(size_t)argc argv:(const JSValueRef [])argv {
+	if( self = [super initWithContext:ctx argc:argc argv:argv] ) {
+		baseTime = [NSDate timeIntervalSinceReferenceDate];
+	}
+	return self;
+}
+
+- (NSString*)deviceName {
 	struct utsname systemInfo;
 	uname( &systemInfo );
 	
@@ -36,8 +46,25 @@
 
 EJ_BIND_FUNCTION(log, ctx, argc, argv ) {
 	if( argc < 1 ) return NULL;
+    
+	NSLog( @"JS %@", JSValueToNSString(ctx, argv[0]) );
+	return NULL;
+}
+
+EJ_BIND_FUNCTION(load, ctx, argc, argv ) {
+	if( argc < 1 ) return NULL;
 	
-	NSLog( @"JS: %@", JSValueToNSString(ctx, argv[0]) );
+	NSObject<UIApplicationDelegate> *app = [[UIApplication sharedApplication] delegate];
+	if( [app respondsToSelector:@selector(loadViewControllerWithScriptAtPath:)] ) {
+		// Queue up the loading till the next frame; the script view may be in the
+		// midst of a timer update
+		[app performSelectorOnMainThread:@selector(loadViewControllerWithScriptAtPath:)
+			withObject:JSValueToNSString(ctx, argv[0]) waitUntilDone:NO];
+	}
+	else {
+		NSLog(@"Error: Current UIApplicationDelegate does not support loadViewControllerWithScriptAtPath.");
+	}
+	
 	return NULL;
 }
 
@@ -61,15 +88,6 @@ EJ_BIND_FUNCTION(requireModule, ctx, argc, argv ) {
 	if( argc < 3 ) { return NULL; }
 	
 	return [scriptView loadModuleWithId:JSValueToNSString(ctx, argv[0]) module:argv[1] exports:argv[2]];
-}
-
-EJ_BIND_FUNCTION(require, ctx, argc, argv ) {
-	// TODO: remove entirely for next release
-	if( argc < 1 ) { return NULL; }
-	NSLog(@"Warning: ejecta.require() is deprecated. Use ejecta.include() instead.");
-	
-	[scriptView loadScriptAtPath:JSValueToNSString(ctx, argv[0])];
-	return NULL;
 }
 
 EJ_BIND_FUNCTION(openURL, ctx, argc, argv ) {
@@ -150,6 +168,10 @@ EJ_BIND_FUNCTION(clearInterval, ctx, argc, argv ) {
 	return [scriptView deleteTimer:ctx argc:argc argv:argv];
 }
 
+EJ_BIND_FUNCTION(performanceNow, ctx, argc, argv ) {
+	NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+	return JSValueMakeNumber(ctx, (now - baseTime) * 1000.0);
+}
 
 EJ_BIND_GET(devicePixelRatio, ctx ) {
 	return JSValueMakeNumber( ctx, [UIScreen mainScreen].scale );
@@ -170,12 +192,31 @@ EJ_BIND_GET(userAgent, ctx ) {
 	);
 }
 
+EJ_BIND_GET(platform, ctx ) {
+	char machine[32];
+	size_t size = sizeof(machine);
+    sysctlbyname("hw.machine", machine, &size, NULL, 0);
+	return NSStringToJSValue(ctx, [NSString stringWithUTF8String:machine] );
+}
+
 EJ_BIND_GET(language, ctx) {
-	return NSStringToJSValue( ctx, [[NSLocale preferredLanguages] objectAtIndex:0] );
+	return NSStringToJSValue( ctx, NSLocale.preferredLanguages[0] );
 }
 
 EJ_BIND_GET(appVersion, ctx ) {
 	return NSStringToJSValue( ctx, EJECTA_VERSION );
+}
+
+EJ_BIND_GET(orientation, ctx ) {
+	int angle = 0;
+	switch( UIApplication.sharedApplication.statusBarOrientation ) {
+		case UIDeviceOrientationPortrait: angle = 0; break;
+		case UIInterfaceOrientationLandscapeLeft: angle = -90; break;
+		case UIInterfaceOrientationLandscapeRight: angle = 90; break;
+		case UIInterfaceOrientationPortraitUpsideDown: angle = 180; break;
+		default: angle = 0; break;
+	}
+	return JSValueMakeNumber(ctx, angle);
 }
 
 EJ_BIND_GET(onLine, ctx) {
@@ -212,6 +253,45 @@ EJ_BIND_GET(onLine, ctx) {
 	}
 	
 	return JSValueMakeBoolean(ctx, false);
+}
+
+EJ_BIND_GET(allowSleepMode, ctx) {
+	return JSValueMakeBoolean(ctx, ![UIApplication sharedApplication].idleTimerDisabled);
+}
+
+EJ_BIND_SET(allowSleepMode, ctx, value) {
+	[UIApplication sharedApplication].idleTimerDisabled = !JSValueToBoolean(ctx, value);
+}
+
+EJ_BIND_GET(otherAudioPlaying, ctx) {
+	return JSValueMakeBoolean(ctx, AVAudioSession.sharedInstance.isOtherAudioPlaying);
+}
+
+EJ_BIND_ENUM(audioSession, self.audioSession,
+	"ambient",		// kEJCoreAudioSessionAmbient
+	"solo-ambient", // kEJCoreAudioSessionSoloAmbient,
+	"playback"		// kEJCoreAudioSessionPlayback
+);
+
+- (EJCoreAudioSession)audioSession {
+	return audioSession;
+}
+
+- (void)setAudioSession:(EJCoreAudioSession)session {
+	audioSession = session;
+	AVAudioSession *instance = AVAudioSession.sharedInstance;
+	
+	switch(audioSession) {
+		case kEJCoreAudioSessionAmbient:
+			[instance setCategory:AVAudioSessionCategoryAmbient error:NULL];
+			break;
+		case kEJCoreAudioSessionSoloAmbient:
+			[instance setCategory:AVAudioSessionCategorySoloAmbient error:NULL];
+			break;
+		case kEJCoreAudioSessionPlayback:
+			[instance setCategory:AVAudioSessionCategoryPlayback error:NULL];
+			break;
+	}
 }
 
 @end

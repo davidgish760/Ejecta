@@ -1,7 +1,7 @@
 #import "EJFont.h"
 #import "EJCanvasContext2D.h"
 #include <malloc/malloc.h>
-#include <ext/hash_map>
+#include <unordered_map>
 
 
 @implementation EJFontDescriptor
@@ -9,30 +9,33 @@
 
 + (id)descriptorWithName:(NSString *)name size:(float)size {
 	// Check if the font exists
-	if( ![UIFont fontWithName:name size:size] ) {
+	if( !name.length || ![UIFont fontWithName:name size:size] ) {
 		return NULL;
 	}
 	
 	EJFontDescriptor *descriptor = [[EJFontDescriptor alloc] init];
 	descriptor->name = [name retain];
 	descriptor->size = size;
-	
-	descriptor->identFilled = [[NSString stringWithFormat:@"%@:F:%.2f", name, size] retain];	
+	descriptor->hash = [name hash] + (size * 383); // 383 is a 'random' prime, chosen by fair dice roll
 	return [descriptor autorelease];
 }
 
+- (NSUInteger)hash {
+	return hash;
+}
+
+- (BOOL)isEqual:(id)anObject {
+	if( ![anObject isKindOfClass:[EJFontDescriptor class]] ) {
+		return NO;
+	}
+	
+	EJFontDescriptor *otherDescriptor = (EJFontDescriptor *)anObject;
+	return (otherDescriptor->size == size && [otherDescriptor->name isEqualToString:name]);
+}
+
 - (void)dealloc {
-	[identFilled release];
 	[name release];
 	[super dealloc];
-}
-
-- (NSString *)identFilled {
-	return identFilled;
-}
-
-- (NSString *)identOutlinedWithWidth:(float)width {
-	return [NSString stringWithFormat:@"%@:O:%.2f:%.2f", name, size, width];
 }
 
 @end
@@ -42,7 +45,7 @@
 @implementation EJFontLayout
 @synthesize metrics, glyphCount;
 
-- (id)initWithGlyphLayout:(NSData *)layout glyphCount:(int)count metrics:(EJTextMetrics)metricsp {
+- (id)initWithGlyphLayout:(NSData *)layout glyphCount:(NSInteger)count metrics:(EJTextMetrics)metricsp {
 	if( self = [super init] ) {
 		glyphLayout = [layout retain];
 		glyphCount = count;
@@ -71,7 +74,7 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 
 @interface EJFont () {
 	// Glyph information
-	__gnu_cxx::hash_map<int, EJFontGlyphInfo> glyphInfoMap;
+	std::unordered_map<int, EJFontGlyphInfo> glyphInfoMap;
 }
 @end
 
@@ -97,13 +100,13 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 			leading	= CTFontGetLeading(ctMainFont);
 			ascent = CTFontGetAscent(ctMainFont);
 			descent = CTFontGetDescent(ctMainFont);
-			lineHeight = leading + ascent + descent;
-			if( leading == 0 ) {
-				ascentDelta = floor (0.2 * lineHeight + 0.5);
-				lineHeight += ascentDelta;
-			}
-			else {
-				ascentDelta = 0.0f;
+			
+			// If we can't fit at least two rows of glyphs into EJ_FONT_TEXTURE_SIZE, create
+			// a new texture for each glyph. Otherwise we're wasting a lot of space.
+			// This of course comes at the expense of a bit of performance, because we have
+			// to bind a few more textures when drawing.
+			if( (ascent + descent) * contentScale > EJ_FONT_TEXTURE_SIZE/2 ) {
+				useSingleGlyphTextures = true;
 			}
 			
 			textures = [[NSMutableArray alloc] initWithCapacity:1];
@@ -123,7 +126,13 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 	CFErrorRef error;
 	CGDataProviderRef provider = CGDataProviderCreateWithCFData((CFDataRef)inData);
 	CGFontRef font = CGFontCreateWithDataProvider(provider);
-	if( !CTFontManagerRegisterGraphicsFont(font, &error) ){
+	
+	if( CTFontManagerRegisterGraphicsFont(font, &error) ){
+		CFStringRef name = CGFontCopyPostScriptName(font);
+		NSLog(@"Loaded Font: %@", (NSString *)name);
+		CFRelease(name);
+	}
+	else {
 		CFStringRef errorDescription = CFErrorCopyDescription(error);
 		NSLog(@"Failed to load font: %@", errorDescription);
 		CFRelease(errorDescription);
@@ -163,7 +172,7 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 	int pxHeight = floorf((glyphInfo->h * contentScale) / 8 + 1) * 8;
 		
 	// Do we need to create a new texture to hold this glyph?
-	BOOL createNewTexture = (textures.count == 0);
+	BOOL createNewTexture = (textures.count == 0 || useSingleGlyphTextures);
 	
 	if( txLineX + pxWidth > EJ_FONT_TEXTURE_SIZE ) {
 		// New line
@@ -178,9 +187,19 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 	}
 	
 	EJTexture *texture;
+	int textureWidth = EJ_FONT_TEXTURE_SIZE,
+		textureHeight = EJ_FONT_TEXTURE_SIZE;
+		
 	if( createNewTexture ) {
-		txLineX = txLineY = txLineH = 0;		
-		texture = [[EJTexture alloc] initWithWidth:EJ_FONT_TEXTURE_SIZE height:EJ_FONT_TEXTURE_SIZE format:GL_ALPHA];
+		txLineX = txLineY = txLineH = 0;
+		
+		// In single glyph mode, create a new texture for each glyph in the glyph's size
+		if( useSingleGlyphTextures ) {
+			textureWidth = pxWidth;
+			textureHeight = pxHeight;
+		}
+		
+		texture = [[EJTexture alloc] initWithWidth:textureWidth height:textureHeight format:GL_ALPHA];
 		[textures addObject:texture];
 		[texture release];	
 	}
@@ -189,10 +208,10 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 	}
 	
 	glyphInfo->textureIndex = textures.count; // 0 is reserved, index starts at 1
-	glyphInfo->tx = ((txLineX+1) / EJ_FONT_TEXTURE_SIZE);
-	glyphInfo->ty = ((txLineY+1) / EJ_FONT_TEXTURE_SIZE);
-	glyphInfo->tw = (glyphInfo->w / EJ_FONT_TEXTURE_SIZE) * contentScale,
-	glyphInfo->th = (glyphInfo->h / EJ_FONT_TEXTURE_SIZE) * contentScale;
+	glyphInfo->tx = ((txLineX+1) / textureWidth);
+	glyphInfo->ty = ((txLineY+1) / textureHeight);
+	glyphInfo->tw = (glyphInfo->w / textureWidth) * contentScale,
+	glyphInfo->th = (glyphInfo->h / textureHeight) * contentScale;
 	
 	NSMutableData *pixels = [NSMutableData dataWithLength:pxWidth * pxHeight];
 	
@@ -224,7 +243,8 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 	}
 	
 	// Render glyph and update the texture
-	CGContextShowGlyphsAtPoint(context, -glyphInfo->x, -glyphInfo->y, &glyph, 1);
+	CGPoint p = CGPointMake(-glyphInfo->x, -glyphInfo->y);
+	CTFontDrawGlyphs(ctMainFont, &glyph, &p, 1, context);
 	[texture updateWithPixels:pixels atX:txLineX y:txLineY width:pxWidth height:pxHeight];
 	
 	// Update texture coordinates
@@ -272,20 +292,20 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 	
 	
 	// Create a layout buffer large enough to hold all glyphs for this line
-	int lineGlyphCount = CTLineGetGlyphCount(line);
-	int layoutBufferSize = sizeof(EJFontGlyphLayout) * lineGlyphCount;
+	NSInteger lineGlyphCount = CTLineGetGlyphCount(line);
+	size_t layoutBufferSize = sizeof(EJFontGlyphLayout) * lineGlyphCount;
 	NSMutableData *layoutData = [NSMutableData dataWithLength:layoutBufferSize];
 	EJFontGlyphLayout *layoutBuffer = (EJFontGlyphLayout *)layoutData.mutableBytes;
 		
 	
 	// Go through all runs for this line
 	CFArrayRef runs = CTLineGetGlyphRuns(line);
-	int runCount = CFArrayGetCount(runs);
+	NSInteger runCount = CFArrayGetCount(runs);
 	
 	int layoutIndex = 0;
 	for( int i = 0; i < runCount; i++ ) {
 		CTRunRef run = (CTRunRef)CFArrayGetValueAtIndex(runs, i);
-		int runGlyphCount = CTRunGetGlyphCount(run);
+		NSInteger runGlyphCount = CTRunGetGlyphCount(run);
 		CTFontRef runFont = (CTFontRef)CFDictionaryGetValue(CTRunGetAttributes(run), kCTFontAttributeName);
 	
 		// Fetch glyphs buffer
@@ -357,9 +377,9 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 			return 0;
 		case kEJTextBaselineTop:
 		case kEJTextBaselineHanging:
-			return (ascent + ascentDelta);
+			return ascent;
 		case kEJTextBaselineMiddle:
-			return (ascent - 0.5 * pointSize);
+			return (ascent - descent)/2;
 		case kEJTextBaselineBottom:
 			return -descent;
 	}
@@ -395,8 +415,8 @@ int EJFontGlyphLayoutSortByTextureIndex(const void *a, const void *b) {
 	
 	// Go through all glyphs - bind textures as needed - and draw
 	EJFontGlyphLayout *layoutBuffer = layout.glyphLayout;
-	int glyphCount = layout.glyphCount;
-	int i = 0;
+	NSInteger glyphCount = layout.glyphCount;
+	NSInteger i = 0;
 	while( i < glyphCount ) {
 		int textureIndex = layoutBuffer[i].textureIndex;
 		[context setTexture:textures[textureIndex-1]];

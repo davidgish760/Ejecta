@@ -1,4 +1,5 @@
 #import "EJCanvasContext2DTexture.h"
+#import "EJJavaScriptView.h"
 
 @implementation EJCanvasContext2DTexture
 
@@ -17,6 +18,17 @@
 	bufferWidth = width * backingStoreRatio;
 	bufferHeight = height * backingStoreRatio;
 	
+	NSLog(
+		@"Creating Offscreen Canvas (2D): "
+			@"size: %dx%d, "
+			@"retina: %@ = %.0fx%.0f, "
+			@"msaa: %@",
+		width, height,
+		(useRetinaResolution ? @"yes" : @"no"),
+		width * backingStoreRatio, height * backingStoreRatio,
+		(msaaEnabled ? [NSString stringWithFormat:@"yes (%d samples)", msaaSamples] : @"no")
+	);
+	
 	// Release previous texture if any, create the new texture and set it as
 	// the rendering target for this framebuffer
 	[texture release];
@@ -30,7 +42,6 @@
 }
 
 - (EJTexture *)texture {
-
 	// If this texture Canvas uses MSAA, we need to resolve the MSAA first,
 	// before we can use the texture for drawing.
 	if( msaaEnabled && needsPresenting ) {
@@ -46,7 +57,20 @@
 		needsPresenting = NO;
 	}
 	
-	return texture;
+	// Special case where this canvas is drawn into itself - we have to use glReadPixels to get a texture
+	if( scriptView.currentRenderingContext == self ) {	
+		float w = width * backingStoreRatio;
+		float h = height * backingStoreRatio;
+		
+		EJTexture *tempTexture = [self getImageDataScaled:1 flipped:upsideDown sx:0 sy:0 sw:w sh:h].texture;
+		tempTexture.contentScale = backingStoreRatio;
+		return tempTexture;
+	}
+	
+	// Just use the framebuffer texture directly
+	else {
+		return texture;
+	}
 }
 
 @end

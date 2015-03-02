@@ -22,7 +22,7 @@
 	return self;
 }
 
-- (void)dealloc {	
+- (void)dealloc {
 	[renderingContext release];
 	[super dealloc];
 }
@@ -38,7 +38,12 @@ EJ_BIND_ENUM(globalCompositeOperation, renderingContext.globalCompositeOperation
 	"destination-out",	// kEJCompositeOperationDestinationOut
 	"destination-over",	// kEJCompositeOperationDestinationOver
 	"source-atop",		// kEJCompositeOperationSourceAtop
-	"xor"				// kEJCompositeOperationXOR
+	"xor",				// kEJCompositeOperationXOR
+	"copy",				// kEJCompositeOperationCopy
+	"source-in",		// kEJCompositeOperationSourceIn
+	"destination-in",	// kEJCompositeOperationDestinationIn
+	"source-out",		// kEJCompositeOperationSourceOut
+	"destination-atop"	// kEJCompositeOperationDestinationAtop
 );
 
 EJ_BIND_ENUM(lineCap, renderingContext.state->lineCap,
@@ -72,11 +77,11 @@ EJ_BIND_ENUM(textBaseline, renderingContext.state->textBaseline,
 
 EJ_BIND_GET(fillStyle, ctx ) {
 	if( renderingContext.fillObject ) {
-		if( [renderingContext.fillObject isKindOfClass:[EJCanvasPattern class]] ) {
+		if( [renderingContext.fillObject isKindOfClass:EJCanvasPattern.class] ) {
 			EJCanvasPattern *pattern = (EJCanvasPattern *)renderingContext.fillObject;
 			return [EJBindingCanvasPattern createJSObjectWithContext:ctx scriptView:scriptView pattern:pattern];
 		}
-		else if( [renderingContext.fillObject isKindOfClass:[EJCanvasGradient class]] ) {
+		else if( [renderingContext.fillObject isKindOfClass:EJCanvasGradient.class] ) {
 			EJCanvasGradient *gradient = (EJCanvasGradient *)renderingContext.fillObject;
 			return [EJBindingCanvasGradient createJSObjectWithContext:ctx scriptView:scriptView gradient:gradient];
 		}
@@ -108,11 +113,40 @@ EJ_BIND_SET(fillStyle, ctx, value) {
 }
 
 EJ_BIND_GET(strokeStyle, ctx ) {
-	return ColorRGBAToJSValue(ctx, renderingContext.state->strokeColor);
+	if( renderingContext.strokeObject ) {
+		if( [renderingContext.strokeObject isKindOfClass:EJCanvasPattern.class] ) {
+			EJCanvasPattern *pattern = (EJCanvasPattern *)renderingContext.strokeObject;
+			return [EJBindingCanvasPattern createJSObjectWithContext:ctx scriptView:scriptView pattern:pattern];
+		}
+		else if( [renderingContext.strokeObject isKindOfClass:EJCanvasGradient.class] ) {
+			EJCanvasGradient *gradient = (EJCanvasGradient *)renderingContext.strokeObject;
+			return [EJBindingCanvasGradient createJSObjectWithContext:ctx scriptView:scriptView gradient:gradient];
+		}
+	}
+	else {
+		return ColorRGBAToJSValue(ctx, renderingContext.state->strokeColor);
+	}
+	
+	return NULL;
 }
 
 EJ_BIND_SET(strokeStyle, ctx, value) {
-	renderingContext.state->strokeColor = JSValueToColorRGBA(ctx, value);
+	if( JSValueIsObject(ctx, value) ) {
+		// Try CanvasPattern or CanvasGradient
+		
+		NSObject<EJFillable> *fillable;
+		if( (fillable = [EJBindingCanvasPattern patternFromJSValue:value]) ) {
+			renderingContext.strokeObject = fillable;
+		}
+		else if( (fillable = [EJBindingCanvasGradient gradientFromJSValue:value]) ) {
+			renderingContext.strokeObject = fillable;
+		}
+	}
+	else {
+		// Should be a color string
+		renderingContext.state->strokeColor = JSValueToColorRGBA(ctx, value);
+		renderingContext.strokeObject = NULL;
+	}
 }
 
 EJ_BIND_GET(globalAlpha, ctx ) {
@@ -154,7 +188,9 @@ EJ_BIND_SET(font, ctx, value) {
 	float size = 0;
 	char name[64];
 	char ptx;
-	sscanf( string, "%fp%1[tx]%*[\"' ]%63[^\"']", &size, &ptx, name); // matches: 10.5p[tx] 'some font'
+	char *start = string;
+	while(*start != '\0' && !isdigit(*start)){ start++; } // skip to the first digit
+	sscanf( start, "%fp%1[tx]%*[\"' ]%63[^\"']", &size, &ptx, name); // matches: 10.5p[tx] 'some font'
 	
 	if( ptx == 't' ) { // pt or px?
 		size = ceilf(size*4.0/3.0);
@@ -163,6 +199,10 @@ EJ_BIND_SET(font, ctx, value) {
 	EJFontDescriptor *font = [EJFontDescriptor descriptorWithName:@(name) size:size];
 	if( font ) {
 		renderingContext.font = font;
+	}
+	else if( size ) {
+		// Font name not found, but we have a size? Use the current font and just change the size
+		renderingContext.font = [EJFontDescriptor descriptorWithName:renderingContext.font.name size:size];
 	}
 	
 	JSStringRelease(jsString);
@@ -224,10 +264,15 @@ EJ_BIND_FUNCTION(setTransform, ctx, argc, argv) {
 EJ_BIND_FUNCTION(drawImage, ctx, argc, argv) {
 	if( argc < 3 ) { return NULL; }
 	
-	NSObject<EJDrawable> *drawable = (NSObject<EJDrawable> *)JSObjectGetPrivate((JSObjectRef)argv[0]);
+	// Set the currentRenderingContext before getting the texture, so we can
+	// correctly treat the case where the currentRenderingContext is the same
+	// as the image being drawn; i.e. a texture canvas drawing into itself.
+	scriptView.currentRenderingContext = renderingContext;
+	
+	NSObject<EJDrawable> *drawable = (NSObject<EJDrawable> *)JSValueGetPrivate(argv[0]);
 	EJTexture *image = drawable.texture;
 	
-	if( !image ) { return NULL; }
+	if( !image.textureId ) { return NULL; }
 	
 	float scale = image.contentScale;
 	
@@ -260,9 +305,7 @@ EJ_BIND_FUNCTION(drawImage, ctx, argc, argv) {
 		return NULL;
 	}
 	
-	scriptView.currentRenderingContext = renderingContext;
 	[renderingContext drawImage:image sx:sx sy:sy sw:sw sh:sh dx:dx dy:dy dw:dw dh:dh];
-	
 	return NULL;
 }
 
@@ -312,10 +355,8 @@ EJ_BIND_FUNCTION(createImageData, ctx, argc, argv) {
 }
 
 EJ_BIND_FUNCTION(putImageData, ctx, argc, argv) {
-	if( argc < 3 ) { return NULL; }
-	
-	EJBindingImageData *jsImageData = (EJBindingImageData *)JSObjectGetPrivate((JSObjectRef)argv[0]);
 	EJ_UNPACK_ARGV_OFFSET(1, float dx, float dy);
+	EJBindingImageData *jsImageData = (EJBindingImageData *)JSValueGetPrivate(argv[0]);
 	
 	scriptView.currentRenderingContext = renderingContext;
 	[renderingContext putImageData:jsImageData.imageData dx:dx dy:dy];
@@ -344,10 +385,8 @@ EJ_BIND_FUNCTION(createImageDataHD, ctx, argc, argv) {
 }
 
 EJ_BIND_FUNCTION(putImageDataHD, ctx, argc, argv) {
-	if( argc < 3 ) { return NULL; }
-	
-	EJBindingImageData *jsImageData = (EJBindingImageData *)JSObjectGetPrivate((JSObjectRef)argv[0]);
 	EJ_UNPACK_ARGV_OFFSET(1, float dx, float dy);
+	EJBindingImageData *jsImageData = (EJBindingImageData *)JSValueGetPrivate(argv[0]);
 	
 	scriptView.currentRenderingContext = renderingContext;
 	[renderingContext putImageDataHD:jsImageData.imageData dx:dx dy:dy];
@@ -373,7 +412,7 @@ EJ_BIND_FUNCTION(createRadialGradient, ctx, argc, argv) {
 
 EJ_BIND_FUNCTION(createPattern, ctx, argc, argv) {
 	if( argc < 1 ) { return NULL; }
-	NSObject<EJDrawable> *drawable = (NSObject<EJDrawable> *)JSObjectGetPrivate((JSObjectRef)argv[0]);
+	NSObject<EJDrawable> *drawable = (NSObject<EJDrawable> *)JSValueGetPrivate(argv[0]);
 	EJTexture *image = drawable.texture;
 	
 	if( !image ) { return NULL; }
@@ -406,8 +445,12 @@ EJ_BIND_FUNCTION( closePath, ctx, argc, argv ) {
 }
 
 EJ_BIND_FUNCTION( fill, ctx, argc, argv ) {
+	EJPathFillRule fillRule = (argc > 0 && [JSValueToNSString(ctx, argv[0]) isEqualToString:@"evenodd"])
+		? kEJPathFillRuleEvenOdd
+		: kEJPathFillRuleNonZero;
+	
 	scriptView.currentRenderingContext = renderingContext;
-	[renderingContext fill];
+	[renderingContext fill:fillRule];
 	return NULL;
 }
 
@@ -472,10 +515,8 @@ EJ_BIND_FUNCTION( measureText, ctx, argc, argv ) {
 }
 
 EJ_BIND_FUNCTION( fillText, ctx, argc, argv ) {
-	if( argc < 3 ) { return NULL; }
-	
-	NSString *string = JSValueToNSString(ctx, argv[0]);
 	EJ_UNPACK_ARGV_OFFSET(1, float x, float y);
+	NSString *string = JSValueToNSString(ctx, argv[0]);
 	
 	scriptView.currentRenderingContext = renderingContext;
 	[renderingContext fillText:string x:x y:y];
@@ -483,10 +524,8 @@ EJ_BIND_FUNCTION( fillText, ctx, argc, argv ) {
 }
 
 EJ_BIND_FUNCTION( strokeText, ctx, argc, argv ) {
-	if( argc < 3 ) { return NULL; }
-	
-	NSString *string = JSValueToNSString(ctx, argv[0]);
 	EJ_UNPACK_ARGV_OFFSET(1, float x, float y);
+	NSString *string = JSValueToNSString(ctx, argv[0]);
 	
 	scriptView.currentRenderingContext = renderingContext;
 	[renderingContext strokeText:string x:x y:y];
@@ -494,8 +533,12 @@ EJ_BIND_FUNCTION( strokeText, ctx, argc, argv ) {
 }
 
 EJ_BIND_FUNCTION( clip, ctx, argc, argv ) {
+	EJPathFillRule fillRule = (argc > 0 && [JSValueToNSString(ctx, argv[0]) isEqualToString:@"evenodd"])
+		? kEJPathFillRuleEvenOdd
+		: kEJPathFillRuleNonZero;
+		
 	scriptView.currentRenderingContext = renderingContext;
-	[renderingContext clip];
+	[renderingContext clip:fillRule];
 	return NULL;
 }
 

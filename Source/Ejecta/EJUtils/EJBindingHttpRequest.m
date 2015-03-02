@@ -38,7 +38,7 @@
 	[password release]; password = NULL;
 }
 
-- (int)getStatusCode {
+- (NSInteger)getStatusCode {
 	if( !response ) {
 		return 0;
 	}
@@ -55,7 +55,7 @@
 	
 	NSStringEncoding encoding = NSASCIIStringEncoding;
 	if ( response.textEncodingName ) {
-		CFStringEncoding cfEncoding = CFStringConvertIANACharSetNameToEncoding((CFStringRef) [response textEncodingName]);
+		CFStringEncoding cfEncoding = CFStringConvertIANACharSetNameToEncoding((CFStringRef) response.textEncodingName);
 		if( cfEncoding != kCFStringEncodingInvalidId ) {
 			encoding = CFStringConvertEncodingToNSStringEncoding(cfEncoding);
 		}
@@ -78,7 +78,7 @@
 	else {
 		[[challenge sender] cancelAuthenticationChallenge:challenge];
 		state = kEJHttpRequestStateDone;
-		[self triggerEvent:@"abort" argc:0 argv:NULL];
+		[self triggerEvent:@"abort"];
 		NSLog(@"XHR: Aborting Request %@ - wrong credentials", url);
 	}
 }
@@ -87,9 +87,10 @@
 	state = kEJHttpRequestStateDone;
 	
 	[connection release]; connection = NULL;
-	[self triggerEvent:@"load" argc:0 argv:NULL];
-	[self triggerEvent:@"loadend" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	[self triggerEvent:@"load"];
+	[self triggerEvent:@"loadend"];
+	[self triggerEvent:@"readystatechange"];
+	JSValueUnprotectSafe(scriptView.jsGlobalContext, jsObject);
 }
 
 - (void)connection:(NSURLConnection *)connectionp didFailWithError:(NSError *)error {
@@ -97,13 +98,14 @@
 	
 	[connection release]; connection = NULL;
 	if( error.code == kCFURLErrorTimedOut ) {
-		[self triggerEvent:@"timeout" argc:0 argv:NULL];
+		[self triggerEvent:@"timeout"];
 	}
 	else {
-		[self triggerEvent:@"error" argc:0 argv:NULL];
+		[self triggerEvent:@"error"];
 	}
-	[self triggerEvent:@"loadend" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	[self triggerEvent:@"loadend"];
+	[self triggerEvent:@"readystatechange"];
+	JSValueUnprotectSafe(scriptView.jsGlobalContext, jsObject);
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)responsep {
@@ -111,8 +113,15 @@
 	
 	[response release];
 	response = (NSHTTPURLResponse *)[responsep retain];
-	[self triggerEvent:@"progress" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	
+	JSContextRef ctx = scriptView.jsGlobalContext;
+	[self triggerEvent:@"progress" properties:(JSEventProperty[]){
+		{"lengthComputable", JSValueMakeBoolean(ctx, response.expectedContentLength != NSURLResponseUnknownLength)},
+		{"total", JSValueMakeNumber(ctx, response.expectedContentLength)},
+		{"loaded", JSValueMakeNumber(ctx, responseBody.length)},
+		{NULL, NULL}
+	}];
+	[self triggerEvent:@"readystatechange"];
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
@@ -122,8 +131,15 @@
 		responseBody = [[NSMutableData alloc] initWithCapacity:1024 * 10]; // 10kb
 	}
 	[responseBody appendData:data];
-	[self triggerEvent:@"progress" argc:0 argv:NULL];
-	[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+	
+	JSContextRef ctx = scriptView.jsGlobalContext;
+	[self triggerEvent:@"progress" properties:(JSEventProperty[]){
+		{"lengthComputable", JSValueMakeBoolean(ctx, response.expectedContentLength != NSURLResponseUnknownLength)},
+		{"total", JSValueMakeNumber(ctx, response.expectedContentLength)},
+		{"loaded", JSValueMakeNumber(ctx, responseBody.length)},
+		{NULL, NULL}
+	}];
+	[self triggerEvent:@"readystatechange"];
 }
 
 
@@ -161,7 +177,7 @@ EJ_BIND_FUNCTION(setRequestHeader, ctx, argc, argv) {
 EJ_BIND_FUNCTION(abort, ctx, argc, argv) {
 	if( connection ) {
 		[self clearConnection];
-		[self triggerEvent:@"abort" argc:0 argv:NULL];
+		[self triggerEvent:@"abort"];
 	}
 	return NULL;
 }
@@ -205,7 +221,7 @@ EJ_BIND_FUNCTION(send, ctx, argc, argv) {
 	NSURL *requestUrl = [NSURL URLWithString:url];
 	if( !requestUrl.host ) {
 		// No host? Assume we have a local file
-		requestUrl = [NSURL fileURLWithPath:[scriptView pathForResource:url]];
+		requestUrl = [NSURL fileURLWithPath:[scriptView pathForResource:requestUrl.path]];
 	}
 	NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:requestUrl];
 	[request setHTTPMethod:method];
@@ -226,7 +242,7 @@ EJ_BIND_FUNCTION(send, ctx, argc, argv) {
 	}	
 	
 	NSLog(@"XHR: %@ %@", method, url);
-	[self triggerEvent:@"loadstart" argc:0 argv:NULL];
+	[self triggerEvent:@"loadstart"];
 	
 	if( async ) {
 		state = kEJHttpRequestStateLoading;
@@ -241,16 +257,20 @@ EJ_BIND_FUNCTION(send, ctx, argc, argv) {
 		if( [response isKindOfClass:[NSHTTPURLResponse class]] ) {
 			NSHTTPURLResponse *urlResponse = (NSHTTPURLResponse *)response;
 			if( urlResponse.statusCode == 200 ) {
-				[self triggerEvent:@"load" argc:0 argv:NULL];
+				[self triggerEvent:@"load"];
 			}
 		}
 		else {
-			[self triggerEvent:@"load" argc:0 argv:NULL];
+			[self triggerEvent:@"load"];
 		}
-		[self triggerEvent:@"loadend" argc:0 argv:NULL];
-		[self triggerEvent:@"readystatechange" argc:0 argv:NULL];
+		[self triggerEvent:@"loadend"];
+		[self triggerEvent:@"readystatechange"];
 	}
 	[request release];
+	
+	// Protect this request object from garbage collection, as its callback functions
+	// may be the only thing holding on to it
+	JSValueProtect(scriptView.jsGlobalContext, jsObject);
 	
 	return NULL;
 }
@@ -260,7 +280,7 @@ EJ_BIND_GET(readyState, ctx) {
 }
 
 EJ_BIND_GET(response, ctx) {
-	if( !response || !responseBody ) { return NULL; }
+	if( !response || !responseBody ) { return JSValueMakeNull(ctx); }
 	
 	if( type == kEJHttpRequestTypeArrayBuffer ) {
 		JSObjectRef array = JSTypedArrayMake(ctx, kJSTypedArrayTypeArrayBuffer, responseBody.length);
@@ -285,7 +305,7 @@ EJ_BIND_GET(response, ctx) {
 
 EJ_BIND_GET(responseText, ctx) {
 	NSString *responseText = [self getResponseText];	
-	return responseText ? NSStringToJSValue( ctx, responseText ) : NULL;
+	return responseText ? NSStringToJSValue( ctx, responseText ) : JSValueMakeNull(ctx);
 }
 
 EJ_BIND_GET(status, ctx) {
@@ -294,7 +314,7 @@ EJ_BIND_GET(status, ctx) {
 
 EJ_BIND_GET(statusText, ctx) {
 	// FIXME: should be "200 OK" instead of just "200"
-	NSString *code = [NSString stringWithFormat:@"%d", [self getStatusCode]];	
+	NSString *code = [NSString stringWithFormat:@"%ld", (long)[self getStatusCode]];	
 	return NSStringToJSValue(ctx, code);
 }
 

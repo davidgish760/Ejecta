@@ -5,33 +5,45 @@
 
 @implementation EJAppViewController
 
-- (id)init{
+- (id)initWithScriptAtPath:(NSString *)pathp {
 	if( self = [super init] ) {
-		landscapeMode = [[[NSBundle mainBundle] infoDictionary][@"UIInterfaceOrientation"]
-			hasPrefix:@"UIInterfaceOrientationLandscape"];
+		path = [pathp retain];
+        if ([[NSBundle mainBundle] infoDictionary][@"UIInterfaceOrientation"])
+        {
+            landscapeMode = [[[NSBundle mainBundle] infoDictionary][@"UIInterfaceOrientation"] hasPrefix:@"UIInterfaceOrientationLandscape"];
+        }
+        else
+        {
+            landscapeMode = [[[NSBundle mainBundle] infoDictionary][@"UISupportedInterfaceOrientations"][0] hasPrefix:@"UIInterfaceOrientationLandscape"];
+        }
 	}
 	return self;
 }
 
 - (void)dealloc {
 	self.view = nil;
+	[path release];
 	[super dealloc];
 }
 
 - (void)didReceiveMemoryWarning {
 	[(EJJavaScriptView *)self.view clearCaches];
+	[super didReceiveMemoryWarning];
 }
 
 - (void)loadView {
 	CGRect frame = UIScreen.mainScreen.bounds;
-	if( landscapeMode ) {
+
+	// iOS pre 8.0 doesn't rotate the frame size in landscape mode, so we have to
+	// do it ourselfs
+	if( landscapeMode && EJECTA_SYSTEM_VERSION_LESS_THAN(@"8.0") ) {
 		frame.size = CGSizeMake(frame.size.height, frame.size.width);
 	}
 	
 	EJJavaScriptView *view = [[EJJavaScriptView alloc] initWithFrame:frame];
 	self.view = view;
 	
-	[view loadScriptAtPath:@"index.js"];
+	[view loadScriptAtPath:path];
 	[view release];
 }
 

@@ -13,15 +13,7 @@
 	banner = [[ADBannerView alloc] initWithFrame:CGRectZero];
 	banner.delegate = self;
 	banner.hidden = YES;
-	
-	BOOL landscape = [[[NSBundle mainBundle] infoDictionary][@"UIInterfaceOrientation"]
-		hasPrefix:@"UIInterfaceOrientationLandscape"];
-	
-	banner.requiredContentSizeIdentifiers = [NSSet setWithObjects:
-		(landscape
-			? ADBannerContentSizeIdentifierLandscape
-			: ADBannerContentSizeIdentifierPortrait),
-		nil];
+	banner.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 	
 	[scriptView addSubview:banner];
 	NSLog(@"AdBanner: init at y %f", banner.frame.origin.y);
@@ -40,15 +32,18 @@
 		[scriptView bringSubviewToFront:banner];
 		banner.hidden = NO;
 	}
-	[self triggerEvent:@"load" argc:0 argv:NULL];
+	[self triggerEvent:@"load"];
 }
 
 - (void)bannerView:(ADBannerView *)theBanner didFailToReceiveAdWithError:(NSError *)error {
-	NSLog(@"AdBanner: Failed to receive Ad. Error: %d - %@", error.code, error.localizedDescription);
-	[self triggerEvent:@"error" argc:0 argv:NULL];
+	NSLog(@"AdBanner: Failed to receive Ad. Error: %ld - %@", (long)error.code, error.localizedDescription);
+	[self triggerEvent:@"error"];
 	banner.hidden = YES;
 }
 
+EJ_BIND_GET( isReady, ctx ) {
+	return JSValueMakeBoolean(ctx, isReady);
+}
 
 EJ_BIND_GET( isAtBottom, ctx ) {
 	return JSValueMakeBoolean(ctx, isAtBottom);

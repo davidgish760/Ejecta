@@ -22,10 +22,6 @@
 		// FIXME: we don't support the 'blob' type yet, but the spec dictates this should
 		// be the default
 		binaryType = kEJWebSocketBinaryTypeBlob;
-		
-		jsEvent = JSObjectMake(ctx, NULL, NULL);
-		JSValueProtect(ctx, jsEvent);
-		jsDataName = JSStringCreateWithUTF8CString("data");
 	}
 	return self;
 }
@@ -48,9 +44,6 @@
 }
 
 - (void) dealloc {
-	JSValueUnprotectSafe(scriptView.jsGlobalContext, jsEvent);
-	JSStringRelease(jsDataName);
-	
 	[url release];
 	[socket release];
 	[super dealloc];
@@ -59,14 +52,14 @@
 - (void)webSocketDidOpen:(SRWebSocket *)webSocket {
 	readyState = kEJWebSocketReadyStateOpen;
 	
-	[self triggerEvent:@"open" argc:0 argv:NULL];
+	[self triggerEvent:@"open"];
 }
 
 - (void)webSocket:(SRWebSocket *)webSocket didFailWithError:(NSError *)error {
 	readyState = kEJWebSocketReadyStateClosed;
 	
-	JSValueRef jsError = NSStringToJSValue(scriptView.jsGlobalContext, error.localizedDescription);
-	[self triggerEvent:@"error" argc:1 argv:(JSValueRef[]){jsError}];
+	NSLog(@"WebSocket Error: %@", error.description);
+	[self triggerEvent:@"error"];
 	
 	[socket release];
 	socket = nil;
@@ -78,7 +71,7 @@
 	
 	// String?
 	if( [message isKindOfClass:[NSString class]] ){
-		jsMessage = NSStringToJSValue(scriptView.jsGlobalContext, message);
+		jsMessage = NSStringToJSValue(ctx, message);
 	}
 	
 	// TypedArray
@@ -95,13 +88,22 @@
 		}
 	}
 	
-	JSObjectSetProperty(ctx, jsEvent, jsDataName, jsMessage, kJSPropertyAttributeNone, NULL);
-	[self triggerEvent:@"message" argc:1 argv:(JSValueRef[]){ jsEvent }];
+	[self triggerEvent:@"message" properties:(JSEventProperty[]){
+		{"data", jsMessage},
+		{NULL, NULL}
+	}];
 }
 
 - (void)webSocket:(SRWebSocket *)webSocket didCloseWithCode:(NSInteger)code reason:(NSString *)reason wasClean:(BOOL)wasClean {
 	readyState = kEJWebSocketReadyStateClosed;
-	[self triggerEvent:@"close" argc:0 argv:NULL];
+	
+	JSContextRef ctx = scriptView.jsGlobalContext;
+	[self triggerEvent:@"close" properties:(JSEventProperty[]){
+		{"code", JSValueMakeNumber(ctx, code)},
+		{"reason", NSStringToJSValue(ctx, reason)},
+		{"wasClean", JSValueMakeBoolean(ctx, wasClean)},
+		{NULL, NULL},
+	}];
 	
 	
 	// Unprotect self from garbage collection

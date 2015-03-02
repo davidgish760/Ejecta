@@ -10,10 +10,13 @@
 #import "EJSharedOpenGLContext.h"
 #import "EJNonRetainingProxy.h"
 
-#define EJECTA_VERSION @"1.2"
+#define EJECTA_VERSION @"1.5"
 #define EJECTA_DEFAULT_APP_FOLDER @"App/"
 
 #define EJECTA_BOOT_JS @"../Ejecta.js"
+
+#define EJECTA_SYSTEM_VERSION_LESS_THAN(v) \
+	([UIDevice.currentDevice.systemVersion compare:v options:NSNumericSearch] == NSOrderedAscending)
 
 
 @protocol EJTouchDelegate
@@ -24,15 +27,17 @@
 - (void)triggerDeviceMotionEvents;
 @end
 
-@protocol EJLifecycleDelegate
+@protocol EJWindowEventsDelegate
 - (void)resume;
 - (void)pause;
+- (void)resize;
 @end
 
 @class EJTimerCollection;
 @class EJClassLoader;
 
 @interface EJJavaScriptView : UIView {
+	CGSize oldSize;
 	NSString *appFolder;
 	
 	BOOL pauseOnEnterBackground;
@@ -56,12 +61,13 @@
 	
 	CADisplayLink *displayLink;
 
-	NSObject<EJLifecycleDelegate> *lifecycleDelegate;
+	NSObject<EJWindowEventsDelegate> *windowEventsDelegate;
 	NSObject<EJTouchDelegate> *touchDelegate;
 	NSObject<EJDeviceMotionDelegate> *deviceMotionDelegate;
 	EJCanvasContext<EJPresentable> *screenRenderingContext;
 
 	NSOperationQueue *backgroundQueue;
+	JSClassRef jsBlockFunctionClass;
 	
 	// Public for fast access in bound functions
 	@public JSValueRef jsUndefined;
@@ -76,7 +82,7 @@
 @property (nonatomic, readonly) JSGlobalContextRef jsGlobalContext;
 @property (nonatomic, readonly) EJSharedOpenGLContext *openGLContext;
 
-@property (nonatomic, retain) NSObject<EJLifecycleDelegate> *lifecycleDelegate;
+@property (nonatomic, retain) NSObject<EJWindowEventsDelegate> *windowEventsDelegate;
 @property (nonatomic, retain) NSObject<EJTouchDelegate> *touchDelegate;
 @property (nonatomic, retain) NSObject<EJDeviceMotionDelegate> *deviceMotionDelegate;
 
@@ -84,11 +90,15 @@
 @property (nonatomic, retain) EJCanvasContext<EJPresentable> *screenRenderingContext;
 
 @property (nonatomic, retain) NSOperationQueue *backgroundQueue;
+@property (nonatomic, retain) EJClassLoader *classLoader;
 
 - (id)initWithFrame:(CGRect)frame appFolder:(NSString *)folder;
 
 - (void)loadScriptAtPath:(NSString *)path;
-- (void)loadScript:(NSString *)script sourceURL:(NSString *)sourceURL;
+- (JSValueRef)evaluateScript:(NSString *)script;
+- (JSValueRef)evaluateScript:(NSString *)script sourceURL:(NSString *)sourceURL;
+- (void)logException:(JSValueRef)exception ctx:(JSContextRef)ctx;
+- (JSValueRef)jsValueForPath:(NSString *)objectPath;
 
 - (void)clearCaches;
 
@@ -97,5 +107,6 @@
 - (JSValueRef)deleteTimer:(JSContextRef)ctx argc:(size_t)argc argv:(const JSValueRef [])argv;
 - (JSValueRef)loadModuleWithId:(NSString *)moduleId module:(JSValueRef)module exports:(JSValueRef)exports;
 - (JSValueRef)createTimer:(JSContextRef)ctxp argc:(size_t)argc argv:(const JSValueRef [])argv repeat:(BOOL)repeat;
+- (JSObjectRef)createFunctionWithBlock:(JSValueRef (^)(JSContextRef ctx, size_t argc, const JSValueRef argv[]))block;
 
 @end
